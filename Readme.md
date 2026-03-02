@@ -1,11 +1,24 @@
-# FIPS Audit Project — Build Instructions
+# FIPS Audit Provider
 
-This project contains two independent components:
+A zero-touch JCA Security Provider that intercepts and logs all non-FIPS
+cryptographic usage in any Java application -- without modifying application
+code, classpath, or startup arguments.
 
-| Folder | Description | Output |
-|--------|-------------|--------|
-| `auditor_app/` | FIPS Audit JCA Provider — intercepts and logs non-FIPS crypto usage | `fips-audit-provider.jar` |
-| `demo_app/` | Standalone crypto demo — exercises weak & strong algorithms for testing | `CryptoDemo.class` |
+## How It Works
+
+`FipsAuditProvider` registers at JCA position 1 and intercepts every
+`getInstance()` call. It **never** processes any cryptographic operation
+itself -- it only observes, logs, and returns `null` so JCA falls through
+to the real native providers (SUN, SunJCE, etc.).
+
+Two audit layers classify each call:
+
+| Layer | Source | What it detects | Required |
+|-------|--------|-----------------|----------|
+| **Layer 1** | BCFIPS oracle | Algorithms rejected by BCFIPS in approved-only mode (MD5, DES, RC4, etc.) | Optional (bc-fips JAR) |
+| **Layer 2** | Policy file | WEAK/DISALLOWED configurations per `fips-policy.properties` (AES/ECB, SHA-1, 3DES, etc.) | Always active |
+
+If Layer 1 is unavailable (no bc-fips JAR), only Layer 2 applies.
 
 ---
 
@@ -13,153 +26,250 @@ This project contains two independent components:
 
 | Component | Version | Notes |
 |-----------|---------|-------|
-| JDK | 17+ (tested with 21) | Any distribution (Oracle, Temurin, Corretto, …) |
-| Maven | 3.8+ | Required only for `auditor_app` |
+| JDK       | 21      | Must match the target JRE's exact version for `jlink` |
+| Maven     | 3.8+    | |
 
 ---
 
-## Downloading `bc-fips-2.0.0.jar`
+## Downloading bc-fips-2.0.0.jar
 
-The Bouncy Castle FIPS jar is **not bundled** in this project. Download it from one of these official sources:
-
-| Source | URL |
-|--------|-----|
-| **Maven Central** | [bc-fips-2.0.0.jar](https://repo1.maven.org/maven2/org/bouncycastle/bc-fips/2.0.0/bc-fips-2.0.0.jar) |
-| **Bouncy Castle website** | [bouncycastle.org/download/bouncy-castle-java-fips](https://www.bouncycastle.org/download/bouncy-castle-java-fips) |
-
-**Direct download via command line:**
+The Bouncy Castle FIPS JAR is **not bundled** in this project.
 
 ```bash
-# Using curl
+# Maven (downloads to target/dependency/)
+cd auditor_app
+mvn dependency:copy-dependencies -DincludeArtifactIds=bc-fips -DoutputDirectory=target/dependency
+
+# Or direct download
 curl -O https://repo1.maven.org/maven2/org/bouncycastle/bc-fips/2.0.0/bc-fips-2.0.0.jar
-
-# Using wget
-wget https://repo1.maven.org/maven2/org/bouncycastle/bc-fips/2.0.0/bc-fips-2.0.0.jar
-
-# Using Maven (downloads to local cache, then copy)
-mvn dependency:copy -Dartifact=org.bouncycastle:bc-fips:2.0.0 -DoutputDirectory=.
 ```
 
-> **Important:** Do **not** repackage `bc-fips-2.0.0.jar` into a fat/uber jar.
-> Bouncy Castle FIPS performs a self-integrity checksum over its own jar bytes;
-> repackaging corrupts the checksum and causes a `FipsOperationError` at runtime.
+> **Important:** Do NOT repackage `bc-fips-2.0.0.jar` into a fat/uber JAR.
+> Bouncy Castle FIPS performs a self-integrity checksum; repackaging breaks it.
 
 ---
 
-## 1. Build `auditor_app` (FIPS Audit Provider)
+## Build
 
 ```bash
 cd auditor_app
 mvn clean package
 ```
 
-This produces:
+Output: `auditor_app/target/fips-audit-provider.jar` (modular JAR with `module-info.class`)
 
-- `auditor_app/target/fips-audit-provider.jar` — the JCA audit provider
-- `bc-fips-2.0.0.jar` is a **provided** dependency (not bundled); download it separately or copy from your Maven cache
-
-To also copy the `bc-fips` dependency jar into `target/dependency/`:
+To also download the bc-fips dependency:
 
 ```bash
-cd auditor_app
 mvn clean package dependency:copy-dependencies -DincludeArtifactIds=bc-fips -DoutputDirectory=target/dependency
 ```
 
-### Using the Auditor
+Verify the module descriptor:
 
-Attach to any Java application via `JAVA_TOOL_OPTIONS` (no code changes needed):
-
-**Linux / macOS:**
 ```bash
-export JAVA_TOOL_OPTIONS="\
-  -Djava.security.properties==/path/to/security-audit.properties \
-  -Dorg.bouncycastle.fips.approved_only=true \
-  -Dfips.audit.log=/var/log/fips-audit.log \
-  -Dfips.audit.stack.depth=30 \
-  -Xbootclasspath/a:/path/to/fips-audit-provider.jar:/path/to/bc-fips-2.0.0.jar"
+jar --describe-module --file=target/fips-audit-provider.jar
 ```
 
-**Windows (cmd):**
-```cmd
-set "JAVA_TOOL_OPTIONS=-Djava.security.properties==C:\path\to\security-audit.properties -Dorg.bouncycastle.fips.approved_only=true -Dfips.audit.log=C:\path\to\fips-audit.log -Dfips.audit.stack.depth=30 -Xbootclasspath/a:C:\path\to\fips-audit-provider.jar;C:\path\to\bc-fips-2.0.0.jar"
-```
+Expected output:
 
-**Windows (PowerShell):**
-```powershell
-$env:JAVA_TOOL_OPTIONS = @"
-    -Djava.security.properties==C:\path\to\security-audit.properties
-    -Dorg.bouncycastle.fips.approved_only=true
-    -Dfips.audit.log=C:\path\to\fips-audit.log
-    -Dfips.audit.stack.depth=30
-    -Xbootclasspath/a:C:\path\to\fips-audit-provider.jar;C:\path\to\bc-fips-2.0.0.jar
-"@
 ```
-
-Then start your application normally — the JVM picks up the options automatically.
-A copy of `security-audit.properties` is included in `auditor_app/` for reference.
+com.demo.fips.audit@1.0-SNAPSHOT
+exports com.demo.fips.audit
+requires java.base
+requires java.instrument
+requires java.logging
+provides java.security.Provider with com.demo.fips.audit.FipsAuditProvider
+```
 
 ---
 
-## 2. Build `demo_app` (Standalone Crypto Demo)
+## Deployment
 
-No Maven required — compile and run with `javac` / `java` directly:
+### Option A: JRE Patch (recommended for JNI-embedded apps)
 
-```bash
-cd demo_app
-javac CryptoDemo.java
-java CryptoDemo
+Use this when the application is launched by a native C++ executable via
+`JNI_CreateJavaVM` and you cannot pass `-javaagent` or `JAVA_TOOL_OPTIONS`.
+
+The `patch-jre.ps1` script uses `jlink` to embed the audit module directly
+into the application's shipped JRE. After patching, FIPS auditing is active
+for every application using that JRE -- zero arguments, zero env vars.
+
+**Requirements:**
+- A full JDK (with `jmods/` directory) matching the target JRE's exact version
+- Write access to the target JRE directory
+
+**Run:**
+
+```powershell
+.\patch-jre.ps1 `
+    -JdkHome   "C:\apps\java\jdk-21.0.7+6" `
+    -TargetJre "C:\MyApp\jre" `
+    -AuditJar  "C:\repos\jfips\auditor_app\target\fips-audit-provider.jar" `
+    -BcfipsJar "C:\repos\jfips\auditor_app\target\dependency\bc-fips-2.0.0.jar"
 ```
 
-### Creating a jar
+Omit `-BcfipsJar` to deploy with Layer 2 (policy rules) only.
 
-To package `CryptoDemo` as an executable jar:
+**What the script does:**
 
-```bash
-cd demo_app
-javac CryptoDemo.java
-jar cfe CryptoDemo.jar CryptoDemo CryptoDemo.class
+1. Discovers all modules in the target JRE
+2. Runs `jlink` to create a new JRE image with the audit module added
+3. Edits `java.security` to register `FipsAuditProvider` at position 1
+4. Copies `bc-fips-2.0.0.jar` into `lib/fips/` (if provided)
+5. Copies `fips-audit.properties` and `fips-policy.properties` into `conf/`
+6. Backs up the original JRE (`.backup` suffix) and swaps in the new one
+
+**Resulting JRE layout:**
+
+```
+<patched-jre>/
+  bin/java.exe
+  conf/
+    fips-audit.properties          <-- audit config (log path, depth, dedupe)
+    fips-policy.properties         <-- algorithm rules (WEAK/DISALLOWED)
+    security/
+      java.security                <-- FipsAuditProvider at position 1
+  lib/
+    fips/
+      bc-fips-2.0.0.jar           <-- BCFIPS oracle (unmodified)
+    modules                        <-- includes com.demo.fips.audit
 ```
 
-Run it with:
+**Rollback:**
 
-```bash
-java -jar CryptoDemo.jar
+```powershell
+# Remove patched JRE and restore backup
+Remove-Item -Recurse -Force "C:\MyApp\jre"
+Rename-Item "C:\MyApp\jre.backup" "jre"
 ```
 
-### Testing the Auditor with the Demo
+---
 
-To run `CryptoDemo` under FIPS audit mode, first build `auditor_app`, then:
+### Option B: Java Agent (for standard java launches)
 
-**Linux / macOS:**
-```bash
-cd demo_app
-javac CryptoDemo.java
-
-java \
-  -Djava.security.properties==../auditor_app/security-audit.properties \
-  -Dorg.bouncycastle.fips.approved_only=true \
-  -Dfips.audit.log=fips-audit.log \
-  -Dfips.audit.stack.depth=30 \
-  -Xbootclasspath/a:../auditor_app/target/fips-audit-provider.jar:../auditor_app/target/dependency/bc-fips-2.0.0.jar \
-  CryptoDemo
-```
+Use this when the application is started with a normal `java` command and
+you can pass arguments or set environment variables.
 
 **Windows (cmd):**
-```cmd
-cd demo_app
-javac CryptoDemo.java
 
-java ^
-  -Djava.security.properties==..\auditor_app\security-audit.properties ^
-  -Dorg.bouncycastle.fips.approved_only=true ^
-  -Dfips.audit.log=fips-audit.log ^
-  -Dfips.audit.stack.depth=30 ^
-  -Xbootclasspath/a:..\auditor_app\target\fips-audit-provider.jar;..\auditor_app\target\dependency\bc-fips-2.0.0.jar ^
-  CryptoDemo
+```cmd
+set "JAVA_TOOL_OPTIONS=-javaagent:C:\path\to\fips-audit-provider.jar -Dorg.bouncycastle.fips.approved_only=true -Dfips.audit.log=C:\path\to\fips-audit.log -Dfips.audit.stack.depth=30 -Dfips.audit.dedupe=true -Xbootclasspath/a:C:\path\to\bc-fips-2.0.0.jar"
 ```
 
-The audit log (`fips-audit.log`) will show every non-FIPS algorithm call with
-the full caller stack trace.
+**Linux / macOS:**
+
+```bash
+export JAVA_TOOL_OPTIONS="\
+  -javaagent:/path/to/fips-audit-provider.jar \
+  -Dorg.bouncycastle.fips.approved_only=true \
+  -Dfips.audit.log=/var/log/fips-audit.log \
+  -Dfips.audit.stack.depth=30 \
+  -Dfips.audit.dedupe=true \
+  -Xbootclasspath/a:/path/to/bc-fips-2.0.0.jar"
+```
+
+Then start the application normally. The JVM picks up `JAVA_TOOL_OPTIONS`
+automatically.
+
+> **Why not `-Djava.security.properties`?**
+> Manipulating `java.security` via properties files is fragile:
+> double `=` replaces the entire file (breaks SSL/TLS), single `=` can
+> conflict with some JDK distributions. The agent avoids both problems.
+
+---
+
+## Configuration
+
+All settings are resolved in order: **system property > config file > default**.
+
+In JRE patch mode, edit `<java.home>/conf/fips-audit.properties`.
+In agent mode, pass `-D` flags.
+
+### fips-audit.properties
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `fips.audit.log` | `fips-audit.log` | Absolute or relative path for the audit log file. Relative paths resolve against the application's working directory. |
+| `fips.audit.stack.depth` | `20` | Max application stack frames per log entry. Set to `0` for no limit. |
+| `fips.audit.dedupe` | `true` | When `true`, each unique violation (classification + type + algorithm + caller site) is logged once per JVM lifetime. Set to `false` to log every occurrence. |
+
+To change settings after patching, edit the file directly in the JRE --
+no rebuild or re-patch needed. Changes take effect on the next JVM startup.
+
+### fips-policy.properties
+
+Defines algorithm-level rules beyond what BCFIPS enforces.
+
+**Format:**
+
+```properties
+<type>.<algorithm>[.<mode>][.<padding>] = APPROVED | WEAK | DISALLOWED [| reason]
+```
+
+**Lookup order (most specific wins):**
+
+1. `Cipher.AES.ECB.NoPadding` (full match)
+2. `Cipher.AES.ECB` (mode match)
+3. `Cipher.AES` (algorithm match)
+4. No match -- defer to BCFIPS probe result
+
+**Example rules:**
+
+```properties
+Cipher.AES.ECB       = WEAK | ECB mode leaks block-level patterns (NIST SP 800-38A)
+Cipher.DESede        = WEAK | 3DES deprecated by NIST after 2023 (SP 800-131A Rev 2)
+MessageDigest.SHA-1  = WEAK | SHA-1 deprecated for signatures (NIST SP 800-131A Rev 2)
+Signature.SHA1withRSA = WEAK | SHA-1 deprecated for signatures
+```
+
+To update rules after patching, edit `<java.home>/conf/fips-policy.properties`
+directly. No rebuild or re-patch needed.
+
+---
+
+## Audit Log Output
+
+Each violation produces an entry like:
+
+```
+FIPS AUDIT - DISALLOWED
+  Timestamp : 2026-02-28T15:30:00.123Z
+  JCA type  : Cipher
+  Algorithm : DES/ECB/PKCS5Padding
+  Reason    : Algorithm not available in BCFIPS approved-only mode
+  Caller stack (application frames):
+    at com.myapp.crypto.LegacyEncryptor.encrypt(LegacyEncryptor.java:45)
+    at com.myapp.service.DataService.process(DataService.java:112)
+```
+
+---
+
+## JRE Patch vs Agent -- When to Use Which
+
+| Scenario | Recommended approach |
+|----------|---------------------|
+| C++ exe launches JVM via `JNI_CreateJavaVM` | **JRE Patch** |
+| Standard `java -jar app.jar` | Agent (simpler) |
+| Cannot modify the JRE directory | Agent |
+| Need zero-config deployment across machines | **JRE Patch** (ship the patched JRE) |
+| App crashes with BCFIPS on bootclasspath | **JRE Patch** (isolates BCFIPS in URLClassLoader) |
+
+---
+
+## Why JRE Patch Is Safer Than Bootclasspath
+
+When `bc-fips.jar` is on the bootclasspath (`-Xbootclasspath/a`), it shares
+the same classloader as JCA. During BCFIPS construction, its internal
+`SecureRandom.getInstance()` call can trigger recursive JCA provider
+resolution, causing intermittent `StackOverflowError` or deadlocks.
+
+The JRE patch loads BCFIPS via an isolated `URLClassLoader` from
+`<java.home>/lib/fips/`. This means:
+
+- BCFIPS is invisible to JCA's provider chain
+- Its internal JCA calls resolve against native providers, never reaching
+  FipsAuditProvider
+- No recursive calls, no deadlocks, no intermittent crashes
 
 ---
 
@@ -167,14 +277,52 @@ the full caller stack trace.
 
 ```
 auditor_app/
-  pom.xml                          Maven project → fips-audit-provider.jar
-  security-audit.properties        JCA provider config (for deployment)
-  src/main/java/.../
-    FipsAuditProvider.java         JCA provider that intercepts crypto calls
-    FipsPolicy.java                Configurable policy engine
+  pom.xml                              Maven build (produces modular JAR)
+  security-audit.properties            Legacy JCA config (not used in patch mode)
+  src/main/java/
+    module-info.java                   JPMS module descriptor
+    com/demo/fips/audit/
+      FipsAuditProvider.java           JCA provider + agent entry points
+      FipsPolicy.java                  Policy engine (reads fips-policy.properties)
   src/main/resources/
-    fips-policy.properties         WEAK/DISALLOWED algorithm rules
+    fips-audit.properties              Audit configuration template
+    fips-policy.properties             Algorithm policy rules template
 
 demo_app/
-  CryptoDemo.java                  Standalone test app (javac + java)
+  CryptoDemo.java                      Test app exercising weak & strong algorithms
+
+patch-jre.ps1                          PowerShell script to patch a JRE with jlink
 ```
+
+---
+
+## Testing with the Demo App
+
+```bash
+cd demo_app
+javac CryptoDemo.java
+```
+
+**With patched JRE:**
+
+```cmd
+"C:\MyApp\jre\bin\java" CryptoDemo
+```
+
+**With agent:**
+
+```cmd
+java -javaagent:..\auditor_app\target\fips-audit-provider.jar ^
+     -Xbootclasspath/a:..\auditor_app\target\dependency\bc-fips-2.0.0.jar ^
+     CryptoDemo
+```
+
+Check `fips-audit.log` for violations.
+
+---
+
+## Re-patching After Code Changes
+
+1. Rebuild: `cd auditor_app && mvn clean package`
+2. Restore backup: rename `<jre>.backup` back to `<jre>`
+3. Re-run `patch-jre.ps1` with the same parameters
