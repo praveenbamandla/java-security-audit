@@ -1,5 +1,7 @@
 package com.demo.fips.audit;
 
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.InputStream;
 import java.util.Properties;
 
@@ -12,7 +14,15 @@ import java.util.Properties;
  * algorithm is technically FIPS-approved but operationally deprecated or
  * insecure (e.g.&nbsp;AES/ECB, SHA-1, 3DES).</p>
  *
- * <p>Lookup uses hierarchical key matching &mdash; the most specific key wins:</p>
+ * <p>Loading order (first found wins):</p>
+ * <ol>
+ *   <li>{@code <java.home>/conf/fips-policy.properties} -- external, editable
+ *       without rebuild (preferred for JRE patch deployment)</li>
+ *   <li>Classpath resource {@code /fips-policy.properties} -- bundled inside
+ *       the JAR (fallback for agent deployment)</li>
+ * </ol>
+ *
+ * <p>Lookup uses hierarchical key matching -- the most specific key wins:</p>
  * <ol>
  *   <li>{@code Type.Algorithm.Mode.Padding}</li>
  *   <li>{@code Type.Algorithm.Mode}</li>
@@ -37,23 +47,60 @@ final class FipsPolicy {
     // ── Internals ──────────────────────────────────────────────────────
 
     private static final String RESOURCE = "/fips-policy.properties";
+    private static final String CONFIG_FILENAME = "fips-policy.properties";
 
     private final Properties rules = new Properties();
 
     FipsPolicy() {
+        // 1. Try external file: <java.home>/conf/fips-policy.properties
+        boolean loaded = loadFromJreConf();
+
+        // 2. Fall back to classpath resource bundled in the JAR
+        if (!loaded) {
+            loaded = loadFromClasspath();
+        }
+
+        if (!loaded) {
+            System.err.println("[FipsAudit] WARNING: " + CONFIG_FILENAME
+                    + " not found in <java.home>/conf/ or on classpath"
+                    + " -- no policy rules active");
+        }
+    }
+
+    private boolean loadFromJreConf() {
+        try {
+            String javaHome = System.getProperty("java.home");
+            if (javaHome == null) return false;
+
+            File f = new File(javaHome, "conf" + File.separator + CONFIG_FILENAME);
+            if (!f.isFile()) return false;
+
+            try (FileInputStream fis = new FileInputStream(f)) {
+                rules.load(fis);
+            }
+            System.err.println("[FipsAudit] Policy loaded: "
+                    + rules.size() + " rules from " + f.getAbsolutePath());
+            return true;
+        } catch (Exception e) {
+            System.err.println("[FipsAudit] WARNING: cannot load external policy: "
+                    + e.getMessage());
+            return false;
+        }
+    }
+
+    private boolean loadFromClasspath() {
         try (InputStream is = getClass().getResourceAsStream(RESOURCE)) {
             if (is != null) {
                 rules.load(is);
                 System.err.println("[FipsAudit] Policy loaded: "
-                        + rules.size() + " rules from " + RESOURCE);
-            } else {
-                System.err.println("[FipsAudit] WARNING: " + RESOURCE
-                        + " not found on classpath — no policy rules active");
+                        + rules.size() + " rules from classpath " + RESOURCE);
+                return true;
             }
         } catch (Exception e) {
             System.err.println("[FipsAudit] WARNING: cannot load "
                     + RESOURCE + ": " + e.getMessage());
         }
+        return false;
     }
 
     // ── Lookup ─────────────────────────────────────────────────────────
